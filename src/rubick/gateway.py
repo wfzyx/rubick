@@ -154,12 +154,14 @@ async def chat_completions(request: Request):
     # 1. Intent Hijacking (when enabled via request body or settings)
     intent_parser_active = body.get("intent_parser", settings.intent_parser)
     if intent_parser_active and messages:
-        intent_type, parsed_args = detect_intent(messages, body)
+        async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
+            intent_type, parsed_args = await detect_intent(
+                messages, body, client=client, backend_url=settings.llama_server_url
+            )
 
-        if intent_type == "embedding":
-            target_text = parsed_args["text"]
-            prompt = format_embedding_prompt(target_text, template=settings.embedding_prompt_template)
-            async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
+            if intent_type == "embedding":
+                target_text = parsed_args["text"]
+                prompt = format_embedding_prompt(target_text, template=settings.embedding_prompt_template)
                 resp = await client.post(
                     f"{settings.llama_server_url}/v1/chat/completions",
                     json={
@@ -178,6 +180,8 @@ async def chat_completions(request: Request):
                     if vector:
                         norm_vec = l2_normalize(vector)
                         prompt_toks = data.get("usage", {}).get("prompt_tokens", len(target_text.split()))
+                        source = parsed_args.get("source", "structural")
+                        confidence = str(parsed_args.get("confidence", 1.0))
                         return JSONResponse(
                             content={
                                 "id": f"chatcmpl-rubick-embed-{int(time.time()*1000)}",
@@ -206,24 +210,25 @@ async def chat_completions(request: Request):
                             headers={
                                 "X-Rubick-Mode": "embedding",
                                 "X-Rubick-Hijacked": "true",
+                                "X-Rubick-Intent-Source": source,
+                                "X-Rubick-Intent-Confidence": confidence,
                             },
                         )
 
-        elif intent_type == "decision":
-            state = parsed_args["state"]
-            question = parsed_args["question"]
-            options = parsed_args["options"]
-            prompt = format_decision_prompt(state, question, options)
-            payload = {
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1,
-                "temperature": 0.0,
-                "logprobs": True,
-                "top_logprobs": 20,
-                "chat_template_kwargs": {"enable_thinking": False},
-                "extra_body": {"enable_thinking": False},
-            }
-            async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
+            elif intent_type == "decision":
+                state = parsed_args["state"]
+                question = parsed_args["question"]
+                options = parsed_args["options"]
+                prompt = format_decision_prompt(state, question, options)
+                payload = {
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 1,
+                    "temperature": 0.0,
+                    "logprobs": True,
+                    "top_logprobs": 20,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "extra_body": {"enable_thinking": False},
+                }
                 resp = await client.post(
                     f"{settings.llama_server_url}/v1/chat/completions",
                     json=payload,
@@ -248,6 +253,8 @@ async def chat_completions(request: Request):
                     best_desc = options.get(best_opt, "")
                     content_str = f"{best_opt}) {best_desc}" if best_desc else best_opt
                     prompt_toks = data.get("usage", {}).get("prompt_tokens", 10)
+                    source = parsed_args.get("source", "structural")
+                    confidence = str(parsed_args.get("confidence", 1.0))
 
                     return JSONResponse(
                         content={
@@ -280,9 +287,10 @@ async def chat_completions(request: Request):
                         headers={
                             "X-Rubick-Mode": "decision",
                             "X-Rubick-Hijacked": "true",
+                            "X-Rubick-Intent-Source": source,
+                            "X-Rubick-Intent-Confidence": confidence,
                         },
                     )
-
     # 2. Auto-Guardian pre-flight screening if requested or globally active
     perform_guardian = body.get("auto_guardian", settings.auto_guardian)
 

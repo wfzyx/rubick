@@ -2,9 +2,13 @@
 Intent detection and parsing for Rubick Gateway.
 Enables auto-routing /completions requests to specialized heads (Decision, Embedding)
 bypassing expensive autoregressive decodes.
+Combines Tier-1 structural cues with a Tier-2 System-1 Decision Head probe.
 """
+import math
 import re
 from typing import Any
+
+import httpx
 
 EMBED_PATTERNS = [
     re.compile(
@@ -18,6 +22,22 @@ EMBED_PATTERNS = [
     ),
     re.compile(r"^\s*embed:\s*(.+)$", re.IGNORECASE | re.DOTALL),
 ]
+
+FEWSHOT_INTENT_ROUTER_PROMPT = """Task: Classify API request into EMBED, DECISION, or CHAT.
+
+Request: "Extract 768-dim vector for this sentence."
+Class: EMBED
+
+Request: "Which option is correct?\nA) True\nB) False"
+Class: DECISION
+
+Request: "Explain quantum computing in simple terms."
+Class: CHAT
+
+Request: "{user_prompt}"
+Class: """
+
+ROUTER_TARGETS = ["EMBED", "DECISION", "CHAT"]
 
 
 def parse_embedding_intent(text: str, body: dict[str, Any] | None = None) -> str | None:
@@ -72,15 +92,71 @@ def parse_decision_options(
     return None
 
 
-def detect_intent(
-    messages: list[dict[str, Any]], body: dict[str, Any] | None = None
+async def classify_intent_with_decision_head(
+    client: httpx.AsyncClient, backend_url: str, text: str
+) -> tuple[str, dict[str, float]]:
+    """
+    Use Rubick's 1-token System-1 Decision Head to classify intent semantically.
+    Returns (dominant_intent, probabilities_dict).
+    """
+    prompt = FEWSHOT_INTENT_ROUTER_PROMPT.format(user_prompt=text)
+    payload = {
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1,
+        "temperature": 0.0,
+        "logprobs": True,
+        "top_logprobs": 20,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "extra_body": {"enable_thinking": False},
+    }
+
+    try:
+        resp = await client.post(f"{backend_url}/v1/chat/completions", json=payload, timeout=5.0)
+        if resp.status_code != 200:
+            return "chat", {"CHAT": 1.0}
+        data = resp.json()
+        choice = data.get("choices", [{}])[0]
+        top_lps = choice.get("logprobs", {}).get("content", [{}])[0].get("top_logprobs", [])
+
+        scores = {}
+        for item in top_lps:
+            raw_tok = item.get("token", "").strip().upper()
+            for tgt in ROUTER_TARGETS:
+                if tgt.startswith(raw_tok) or raw_tok.startswith(tgt):
+                    if tgt not in scores:
+                        scores[tgt] = item.get("logprob", -100.0)
+
+        raw = {k: math.exp(scores.get(k, -100.0)) for k in ROUTER_TARGETS}
+        tot = sum(raw.values())
+        if not tot:
+            return "chat", {"CHAT": 1.0}
+        probs = {k: round(v / tot, 4) for k, v in raw.items()}
+        best = max(probs, key=probs.get) if max(probs.values()) > 0.0 else "CHAT"
+
+        mode_map = {
+            "EMBED": "embedding",
+            "DECISION": "decision",
+            "CHAT": "chat",
+        }
+        return mode_map.get(best, "chat"), probs
+    except Exception:
+        return "chat", {"CHAT": 1.0}
+
+
+async def detect_intent(
+    messages: list[dict[str, Any]],
+    body: dict[str, Any] | None = None,
+    client: httpx.AsyncClient | None = None,
+    backend_url: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """
     Main intent classifier for Rubick.
+    Tier 1: Fast structural & explicit cues (< 0.1ms)
+    Tier 2: Model-based System-1 Decision Head semantic probe (~50ms)
     Returns:
-      ("embedding", {"text": ...})
-      ("decision", {"state": ..., "question": ..., "options": ...})
-      ("chat", {})
+      ("embedding", {"text": ..., "confidence": ...})
+      ("decision", {"state": ..., "question": ..., "options": ..., "confidence": ...})
+      ("chat", {"confidence": ...})
     """
     last_user_msg = ""
     for m in reversed(messages):
@@ -88,16 +164,45 @@ def detect_intent(
             last_user_msg = m["content"].strip()
             break
 
-    # 1. Check embedding intent
+    # Tier 1: Check fast structural and explicit cues first
     embed_target = parse_embedding_intent(last_user_msg, body)
     if embed_target:
-        return "embedding", {"text": embed_target}
+        return "embedding", {"text": embed_target, "confidence": 1.0, "source": "structural"}
 
-    # 2. Check decision intent
     decision_tuple = parse_decision_options(last_user_msg, body)
     if decision_tuple:
         state, question, options = decision_tuple
-        return "decision", {"state": state, "question": question, "options": options}
+        return "decision", {
+            "state": state,
+            "question": question,
+            "options": options,
+            "confidence": 1.0,
+            "source": "structural",
+        }
 
-    # 3. Default: standard generative chat
-    return "chat", {}
+    # Tier 2: Model-based Decision Head probe
+    if client and backend_url and last_user_msg:
+        semantic_intent, probs = await classify_intent_with_decision_head(
+            client, backend_url, last_user_msg
+        )
+        confidence = probs.get(semantic_intent.upper(), 0.0)
+        if semantic_intent == "embedding" and confidence > 0.60:
+            return "embedding", {
+                "text": last_user_msg,
+                "confidence": confidence,
+                "source": "decision_head",
+            }
+        elif semantic_intent == "decision" and confidence > 0.60:
+            dec_opts = parse_decision_options(last_user_msg, body)
+            if dec_opts:
+                state, question, options = dec_opts
+                return "decision", {
+                    "state": state,
+                    "question": question,
+                    "options": options,
+                    "confidence": confidence,
+                    "source": "decision_head",
+                }
+
+    # Default: standard generative chat
+    return "chat", {"confidence": 1.0, "source": "default"}

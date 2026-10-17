@@ -64,3 +64,33 @@ def test_tower_frognano_decision():
         assert "probabilities" in data
     finally:
         settings.llama_server_url = old_url
+
+
+
+@pytest.mark.skipif(not is_tower_available(), reason="Tower host (192.168.0.9:8080) is not reachable")
+@pytest.mark.asyncio
+async def test_tower_intent_classification_decision_head():
+    """Verify that FrogNano's System-1 Decision Head correctly classifies intent semantically."""
+    from rubick.intent import classify_intent_with_decision_head
+
+    async with httpx.AsyncClient() as async_client:
+        # 1. Embedding intent
+        mode_emb, probs_emb = await classify_intent_with_decision_head(
+            async_client, TOWER_URL, "Could you generate a semantic vector representation for this documentation page?"
+        )
+        assert mode_emb == "embedding"
+        assert probs_emb["EMBED"] > 0.70
+
+        # 2. Decision intent
+        mode_dec, probs_dec = await classify_intent_with_decision_head(
+            async_client, TOWER_URL, "Which license should I choose for an open source tool? MIT, Apache, or GPL?"
+        )
+        assert mode_dec == "decision"
+        assert probs_dec["DECISION"] > 0.70
+
+        # 3. Conversational chat intent
+        mode_chat, probs_chat = await classify_intent_with_decision_head(
+            async_client, TOWER_URL, "Write a Python script to calculate Fibonacci numbers with memoization."
+        )
+        assert mode_chat == "chat"
+        assert probs_chat["CHAT"] > 0.70
