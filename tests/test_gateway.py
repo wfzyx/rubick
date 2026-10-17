@@ -472,3 +472,20 @@ def test_chat_completions_decision_hijack_includes_explanation_by_default():
     assert data["decision"].get("explanation") is not None
     # Message content contains explanation and confidence
     assert "confidence" in data["choices"][0]["message"]["content"]
+def test_intent_parser_generic_markdown_list_stays_chat():
+    """Verify that an ordinary notes/todo list with no decision cue is NOT hijacked."""
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Here are the notes from our morning sync:\n- deploy v1.2\n- review PR 30732\n- update documentation",
+                }
+            ],
+            "max_tokens": 5,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("x-rubick-mode") == "chat"
+    assert resp.headers.get("x-rubick-hijacked") == "false"

@@ -2,48 +2,45 @@
 Intent detection and parsing for Rubick Gateway.
 Enables auto-routing /completions requests to specialized heads (Decision, Embedding)
 bypassing expensive autoregressive decodes.
-Combines Tier-1 structural cues with a Tier-2 System-1 Decision Head probe.
+
+Uses LLM-based recursive extraction: queries the model directly to detect decision
+intent and extract structured question and options as JSON. Zero fragile regexes.
 """
-import math
-import re
+import json
 from typing import Any
 
 import httpx
 
-EMBED_PATTERNS = [
-    re.compile(
-        r"^\s*(?:please\s+)?(?:generate\s+)?(?:extract\s+)?(?:get\s+)?(?:embed|embedding|vectorize|semantic vector)(?:\s+this)?(?:\s+for)?(?:\s+of)?(?:\s+text)?\s*:\s*(.+)$",
-        re.IGNORECASE | re.DOTALL,
-    ),
-    re.compile(r"^\s*(?:embed|vectorize)\s*:\s*(.+)$", re.IGNORECASE | re.DOTALL),
-    re.compile(
-        r"^\s*(?:calculate|compute)\s+(?:the\s+)?(?:embedding|vector)\s+(?:for|of)\s*:\s*(.+)$",
-        re.IGNORECASE | re.DOTALL,
-    ),
-    re.compile(r"^\s*embed:\s*(.+)$", re.IGNORECASE | re.DOTALL),
-]
+DECISION_PARSER_PROMPT = """You are a decision parser. Analyze the user request.
+If the user wants to decide, choose, pick, or classify between alternatives/options, extract the question and options as compact JSON.
+If it is NOT a decision between alternatives (e.g. general questions, instructions, notes, todo lists, storytelling), return {{"is_decision": false}}.
 
-FEWSHOT_INTENT_ROUTER_PROMPT = """Task: Classify API request into EMBED, DECISION, or CHAT.
+User: "which should I pick? A) Red B) Blue"
+JSON: {{"is_decision": true, "question": "Which should I pick?", "options": ["Red", "Blue"]}}
 
-Request: "Extract 768-dim vector for this sentence."
-Class: EMBED
+User: "decision: which of these should I eat\\n- pizza\\n- sushi\\n- salad"
+JSON: {{"is_decision": true, "question": "Which of these should I eat?", "options": ["pizza", "sushi", "salad"]}}
 
-Request: "Which option is correct?\nA) True\nB) False"
-Class: DECISION
+User: "what should I choose between pizza, sushi, or salad?"
+JSON: {{"is_decision": true, "question": "What should I choose?", "options": ["pizza", "sushi", "salad"]}}
 
-Request: "Explain quantum computing in simple terms."
-Class: CHAT
+User: "Should I pick AWS, GCP, or Azure for hosting?"
+JSON: {{"is_decision": true, "question": "Which cloud provider should I pick?", "options": ["AWS", "GCP", "Azure"]}}
 
-Request: "{user_prompt}"
-Class: """
+User: "Here are the notes from our sync:\\n- deploy v1.2\\n- review PR 30732"
+JSON: {{"is_decision": false}}
 
-ROUTER_TARGETS = ["EMBED", "DECISION", "CHAT"]
+User: "Tell me a short bedtime story about a friendly robot."
+JSON: {{"is_decision": false}}
+
+User: "{user_prompt}"
+JSON:"""
 
 
-def parse_embedding_intent(text: str, body: dict[str, Any] | None = None) -> str | None:
+def check_embedding_intent(text: str, body: dict[str, Any] | None = None) -> str | None:
     """
-    Detect if the user prompt or body is requesting an embedding extraction.
-    Returns the target text to embed, or None.
+    Check if request is an embedding extraction.
+    Simple string prefixes and explicit payload flags.
     """
     if body:
         if body.get("intent") in ("embed", "embedding", "vectorize") or body.get("mode") == "embedding":
@@ -51,96 +48,109 @@ def parse_embedding_intent(text: str, body: dict[str, Any] | None = None) -> str
         if body.get("return_last_hidden_state") is True:
             return text
 
-    for pattern in EMBED_PATTERNS:
-        m = pattern.match(text)
-        if m:
-            extracted = m.group(1).strip()
-            if extracted:
-                return extracted
+    clean = text.strip()
+    clean_lower = clean.lower()
+    for prefix in ("embed:", "embedding:", "vectorize:"):
+        if clean_lower.startswith(prefix):
+            target = clean[len(prefix):].strip()
+            if target:
+                return target
+
     return None
 
 
-def parse_decision_options(
-    text: str, body: dict[str, Any] | None = None
-) -> tuple[str, str, dict[str, str]] | None:
-    """
-    Detect if the user prompt or body contains categorical decision options.
-    Returns (state, question, options_dict) or None.
-    """
-    if body and "options" in body and isinstance(body["options"], dict):
-        return body.get("state", text), body.get("question", "Select the best option:"), body["options"]
-
-    # Match A) Option text, A. Option text, A: Option text, [A] Option text, 1) Option text
-    pattern_letter = re.compile(
-        r"(?:^|\n)\s*(?:\[)?([A-Z0-9])(?:\]|\)|\:|\.)\s+([^\n]+)", re.MULTILINE
-    )
-    matches = pattern_letter.findall(text)
-    if len(matches) >= 2:
-        keys = [m[0].upper() for m in matches]
-        # Only treat as options if keys are unique and non-empty
-        if len(keys) == len(set(keys)) and len(keys) <= 26:
-            options = {m[0].upper(): m[1].strip() for m in matches}
-            first_match_start = text.find(matches[0][1])
-            preamble = text[:first_match_start].strip()
-            # Strip trailing option label prefix from preamble if left behind
-            preamble = re.sub(
-                r"(?:^|\n)\s*(?:\[)?" + re.escape(matches[0][0]) + r"(?:\]|\)|\:|\.)\s*$",
-                "",
-                preamble,
-            ).strip()
-            return preamble, "Select the best option:", options
-    return None
-
-
-async def classify_intent_with_decision_head(
+async def extract_decision_via_llm(
     client: httpx.AsyncClient, backend_url: str, text: str
-) -> tuple[str, dict[str, float]]:
+) -> tuple[str, dict[str, str]] | None:
     """
-    Use Rubick's 1-token System-1 Decision Head to classify intent semantically.
-    Returns (dominant_intent, probabilities_dict).
+    Recursive LLM call: uses the model itself to parse the user's prompt into
+    a clean question and normalized options dictionary {"A": ..., "B": ...}.
+    Returns (question, options_dict) or None if not a decision.
     """
-    prompt = FEWSHOT_INTENT_ROUTER_PROMPT.format(user_prompt=text)
+    prompt = DECISION_PARSER_PROMPT.format(user_prompt=text)
     payload = {
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1,
+        "max_tokens": 120,
         "temperature": 0.0,
-        "logprobs": True,
-        "top_logprobs": 20,
         "chat_template_kwargs": {"enable_thinking": False},
         "extra_body": {"enable_thinking": False},
     }
 
     try:
-        resp = await client.post(f"{backend_url}/v1/chat/completions", json=payload, timeout=5.0)
+        resp = await client.post(f"{backend_url}/v1/chat/completions", json=payload, timeout=6.0)
         if resp.status_code != 200:
-            return "chat", {"CHAT": 1.0}
-        data = resp.json()
-        choice = data.get("choices", [{}])[0]
-        top_lps = choice.get("logprobs", {}).get("content", [{}])[0].get("top_logprobs", [])
+            return None
+        raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
-        scores = {}
-        for item in top_lps:
-            raw_tok = item.get("token", "").strip().upper()
-            for tgt in ROUTER_TARGETS:
-                if tgt.startswith(raw_tok) or raw_tok.startswith(tgt):
-                    if tgt not in scores:
-                        scores[tgt] = item.get("logprob", -100.0)
+        # Extract JSON substring
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
 
-        raw = {k: math.exp(scores.get(k, -100.0)) for k in ROUTER_TARGETS}
-        tot = sum(raw.values())
-        if not tot:
-            return "chat", {"CHAT": 1.0}
-        probs = {k: round(v / tot, 4) for k, v in raw.items()}
-        best = max(probs, key=probs.get) if max(probs.values()) > 0.0 else "CHAT"
+        parsed = json.loads(raw[start : end + 1])
+        if not parsed.get("is_decision"):
+            return None
 
-        mode_map = {
-            "EMBED": "embedding",
-            "DECISION": "decision",
-            "CHAT": "chat",
-        }
-        return mode_map.get(best, "chat"), probs
+        raw_opts = parsed.get("options")
+        if not raw_opts:
+            return None
+
+        options = {}
+        if isinstance(raw_opts, list):
+            options = {
+                chr(ord("A") + i): str(opt).strip()
+                for i, opt in enumerate(raw_opts)
+                if str(opt).strip()
+            }
+        elif isinstance(raw_opts, dict):
+            keys = list(raw_opts.keys())
+            if all(len(k) == 1 and k.isalpha() for k in keys):
+                options = {k.upper(): str(v).strip() for k, v in raw_opts.items()}
+            else:
+                options = {
+                    chr(ord("A") + i): str(v).strip()
+                    for i, v in enumerate(raw_opts.values())
+                }
+
+        if len(options) >= 2 and len(options) <= 26:
+            question = parsed.get("question", text).strip()
+            return question, options
     except Exception:
-        return "chat", {"CHAT": 1.0}
+        pass
+    return None
+
+def parse_explicit_options(
+    text: str, body: dict[str, Any] | None = None
+) -> tuple[str, str, dict[str, str]] | None:
+    """Check for explicit body options {"options": {"A": ...}} or structured A) B) patterns."""
+    if body and "options" in body and isinstance(body["options"], dict):
+        return body.get("state", text), body.get("question", "Select the best option:"), body["options"]
+
+    import re
+    clean_text = text.strip()
+    if clean_text.lower().startswith("decision:"):
+        clean_text = clean_text[len("decision:"):].strip()
+
+    pattern_letter = re.compile(
+        r"(?:^|\n)\s*(?:\[)?([A-Z0-9])(?:\]|\)|\:|\.)\s+([^\n]+)", re.MULTILINE
+    )
+    matches = pattern_letter.findall(clean_text)
+    if len(matches) >= 2:
+        keys = [m[0].upper() for m in matches]
+        if len(keys) == len(set(keys)) and len(keys) <= 26:
+            options = {m[0].upper(): m[1].strip() for m in matches}
+            first_match_start = clean_text.find(matches[0][1])
+            preamble = clean_text[:first_match_start].strip()
+            preamble = re.sub(
+                r"(?:^|\n)\s*(?:\[)?" + re.escape(matches[0][0]) + r"(?:\]|\)|\:|\.)\s*$",
+                "",
+                preamble,
+            ).strip()
+            question = preamble or "Select the best option:"
+            return clean_text, question, options
+
+    return None
 
 
 async def detect_intent(
@@ -151,12 +161,9 @@ async def detect_intent(
 ) -> tuple[str, dict[str, Any]]:
     """
     Main intent classifier for Rubick.
-    Tier 1: Fast structural & explicit cues (< 0.1ms)
-    Tier 2: Model-based System-1 Decision Head semantic probe (~50ms)
-    Returns:
-      ("embedding", {"text": ..., "confidence": ...})
-      ("decision", {"state": ..., "question": ..., "options": ..., "confidence": ...})
-      ("chat", {"confidence": ...})
+    1. Embedding check: simple string prefix or explicit body flag.
+    2. Explicit options in body: {"options": {"A": ...}}.
+    3. Recursive LLM parsing: let the model extract question and options as JSON.
     """
     last_user_msg = ""
     for m in reversed(messages):
@@ -164,45 +171,34 @@ async def detect_intent(
             last_user_msg = m["content"].strip()
             break
 
-    # Tier 1: Check fast structural and explicit cues first
-    embed_target = parse_embedding_intent(last_user_msg, body)
+    # 1. Embedding check
+    embed_target = check_embedding_intent(last_user_msg, body)
     if embed_target:
-        return "embedding", {"text": embed_target, "confidence": 1.0, "source": "structural"}
+        return "embedding", {"text": embed_target, "confidence": 1.0, "source": "explicit"}
 
-    decision_tuple = parse_decision_options(last_user_msg, body)
-    if decision_tuple:
-        state, question, options = decision_tuple
+    # 2. Explicit options in payload or obvious A) B) pattern
+    explicit_tuple = parse_explicit_options(last_user_msg, body)
+    if explicit_tuple:
+        state, question, options = explicit_tuple
         return "decision", {
             "state": state,
             "question": question,
             "options": options,
             "confidence": 1.0,
-            "source": "structural",
+            "source": "explicit",
         }
-
-    # Tier 2: Model-based Decision Head probe
+    # 3. Recursive LLM decision extraction
     if client and backend_url and last_user_msg:
-        semantic_intent, probs = await classify_intent_with_decision_head(
-            client, backend_url, last_user_msg
-        )
-        confidence = probs.get(semantic_intent.upper(), 0.0)
-        if semantic_intent == "embedding" and confidence > 0.60:
-            return "embedding", {
-                "text": last_user_msg,
-                "confidence": confidence,
-                "source": "decision_head",
+        extracted = await extract_decision_via_llm(client, backend_url, last_user_msg)
+        if extracted:
+            question, options = extracted
+            return "decision", {
+                "state": last_user_msg,
+                "question": question,
+                "options": options,
+                "confidence": 0.95,
+                "source": "llm_recursive",
             }
-        elif semantic_intent == "decision" and confidence > 0.60:
-            dec_opts = parse_decision_options(last_user_msg, body)
-            if dec_opts:
-                state, question, options = dec_opts
-                return "decision", {
-                    "state": state,
-                    "question": question,
-                    "options": options,
-                    "confidence": confidence,
-                    "source": "decision_head",
-                }
 
     # Default: standard generative chat
     return "chat", {"confidence": 1.0, "source": "default"}
