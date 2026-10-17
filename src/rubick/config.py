@@ -17,7 +17,10 @@ class Settings:
         default_factory=lambda: os.getenv("RUBICK_AUTO_GUARDIAN", "false").lower() in ("true", "1", "yes")
     )
     intent_parser: bool = field(
-        default_factory=lambda: os.getenv("RUBICK_INTENT_PARSER", "false").lower() in ("true", "1", "yes")
+        default_factory=lambda: os.getenv("RUBICK_INTENT_PARSER", "true").lower() in ("true", "1", "yes")
+    )
+    explain: bool = field(
+        default_factory=lambda: os.getenv("RUBICK_EXPLAIN", "true").lower() in ("true", "1", "yes")
     )
     embedding_prompt_template: str = field(
         default_factory=lambda: os.getenv(

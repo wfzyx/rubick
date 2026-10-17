@@ -251,10 +251,54 @@ async def chat_completions(request: Request):
                     probabilities = {k: v / total for k, v in raw_scores.items()}
                     best_opt = max(probabilities, key=probabilities.get)
                     best_desc = options.get(best_opt, "")
-                    content_str = f"{best_opt}) {best_desc}" if best_desc else best_opt
+                    confidence_pct = round(probabilities[best_opt] * 100, 1)
+
+                    # Generate concise natural language summary/explanation if enabled
+                    should_explain = body.get("explain", body.get("include_summary", settings.explain))
+                    explanation = ""
+                    if should_explain:
+                        explain_prompt = f"State: {state}\nDecision: Option {best_opt} ({best_desc} - {confidence_pct}% confidence)\n\nExplain this decision to the user in one concise sentence:"
+                        try:
+                            exp_resp = await client.post(
+                                f"{settings.llama_server_url}/v1/chat/completions",
+                                json={
+                                    "messages": [{"role": "user", "content": explain_prompt}],
+                                    "max_tokens": 50,
+                                    "temperature": 0.3,
+                                    "chat_template_kwargs": {"enable_thinking": False},
+                                    "extra_body": {"enable_thinking": False},
+                                },
+                            )
+                            if exp_resp.status_code == 200:
+                                exp_data = exp_resp.json()
+                                exp_content = (
+                                    exp_data.get("choices", [{}])[0]
+                                    .get("message", {})
+                                    .get("content", "")
+                                    .strip()
+                                )
+                                if exp_content:
+                                    explanation = exp_content
+                        except Exception:
+                            explanation = ""
+
+                    if explanation:
+                        content_str = (
+                            f"{best_opt}) {best_desc} ({confidence_pct}% confidence) — {explanation}"
+                            if best_desc
+                            else f"Option {best_opt} ({confidence_pct}% confidence) — {explanation}"
+                        )
+                    else:
+                        content_str = (
+                            f"{best_opt}) {best_desc} ({confidence_pct}% confidence)"
+                            if best_desc
+                            else f"Option {best_opt} ({confidence_pct}% confidence)"
+                        )
+
                     prompt_toks = data.get("usage", {}).get("prompt_tokens", 10)
                     source = parsed_args.get("source", "structural")
                     confidence = str(parsed_args.get("confidence", 1.0))
+                    completion_toks = len(content_str.split())
 
                     return JSONResponse(
                         content={
@@ -274,14 +318,16 @@ async def chat_completions(request: Request):
                             ],
                             "usage": {
                                 "prompt_tokens": prompt_toks,
-                                "completion_tokens": 1,
-                                "total_tokens": prompt_toks + 1,
+                                "completion_tokens": completion_toks,
+                                "total_tokens": prompt_toks + completion_toks,
                             },
                             "rubick_routed_mode": "decision",
                             "decision": {
                                 "best_option": best_opt,
                                 "best_description": best_desc,
                                 "probabilities": probabilities,
+                                "confidence_pct": confidence_pct,
+                                "explanation": explanation or None,
                             },
                         },
                         headers={
@@ -289,6 +335,7 @@ async def chat_completions(request: Request):
                             "X-Rubick-Hijacked": "true",
                             "X-Rubick-Intent-Source": source,
                             "X-Rubick-Intent-Confidence": confidence,
+                            "X-Rubick-Explained": "true" if explanation else "false",
                         },
                     )
     # 2. Auto-Guardian pre-flight screening if requested or globally active
@@ -404,11 +451,44 @@ async def categorical_decision(request: Request):
         total = sum(raw_scores.values()) or 1.0
         probabilities = {k: v / total for k, v in raw_scores.items()}
         best_option = max(probabilities, key=probabilities.get)
+        best_desc = options.get(best_option, "")
+        confidence_pct = round(probabilities[best_option] * 100, 1)
+
+        # Generate concise natural language summary/explanation if enabled
+        should_explain = body.get("explain", body.get("include_summary", settings.explain))
+        explanation = None
+        if should_explain:
+            explain_prompt = f"State: {state}\nDecision: Option {best_option} ({best_desc} - {confidence_pct}% confidence)\n\nExplain this decision to the user in one concise sentence:"
+            try:
+                exp_resp = await client.post(
+                    f"{settings.llama_server_url}/v1/chat/completions",
+                    json={
+                        "messages": [{"role": "user", "content": explain_prompt}],
+                        "max_tokens": 50,
+                        "temperature": 0.3,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                        "extra_body": {"enable_thinking": False},
+                    },
+                )
+                if exp_resp.status_code == 200:
+                    exp_data = exp_resp.json()
+                    exp_content = (
+                        exp_data.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        .strip()
+                    )
+                    if exp_content:
+                        explanation = exp_content
+            except Exception:
+                explanation = None
 
         return {
             "best_option": best_option,
-            "best_description": options.get(best_option),
+            "best_description": best_desc,
             "probabilities": probabilities,
+            "confidence_pct": confidence_pct,
+            "explanation": explanation,
             "question": question,
             "options": options,
         }

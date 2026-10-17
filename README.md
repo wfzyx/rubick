@@ -268,16 +268,20 @@ cd /path/to/rubick
 uv run rubick --backend http://127.0.0.1:8080 --port 8000
 ```
 
-### 4. Optional: Enable Transparent Intent Hijacking (`--intent-parser`)
-Run Rubick with `--intent-parser` to automatically route incoming standard `/v1/chat/completions` calls to the fastest execution head:
-- **Multiple-choice / triage prompts:** Automatically hijacked to 1-token System-1 Decision (~149 ms) instead of burning hundreds of autoregressive tokens.
+### 4. Intelligent Intent Auto-Routing & Natural Explanations (Enabled by Default)
+Rubick runs with `--intent-parser` and `--explain` enabled out of the box:
+- **Multiple-choice / triage prompts:** Evaluates the mathematical decision in a **1-token forward pass (~149 ms)**, then attaches a concise natural language explanation from the chat head using the warmed prompt KV cache.
 - **Embedding requests (`"Embed: ..."`, `"embed: ..."`, `"vectorize: ..."`):** Automatically hijacked to 1-token PromptEOL Last-Hidden-State Embedding extraction.
 - **Conversational questions:** Transparently passed through to full autoregressive Chat.
 
 ```bash
-uv run rubick --backend http://127.0.0.1:8080 --port 8000 --intent-parser
+# Enabled by default:
+uv run rubick --backend http://127.0.0.1:8080 --port 8000
+
+# To disable auto-routing or explanations:
+uv run rubick --backend http://127.0.0.1:8080 --port 8000 --no-intent-parser --no-explain
 ```
-*(Every response includes `X-Rubick-Mode` and `X-Rubick-Hijacked` headers confirming the path taken).*
+*(Every response includes `X-Rubick-Mode`, `X-Rubick-Hijacked`, and `X-Rubick-Explained` headers confirming the path taken).*
 
 ---
 

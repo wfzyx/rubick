@@ -377,19 +377,55 @@ def test_intent_parser_passthrough_chat():
     assert len(data["choices"]) > 0
 
 
-def test_intent_parser_disabled_by_default():
-    """Verify that when intent_parser is not enabled, cues are treated as standard chat prompts."""
-    # Ensure global setting is False
-    settings.intent_parser = False
+def test_intent_parser_enabled_by_default():
+    """Verify that intent parsing and hijacking is active by default without explicit flags."""
+    settings.intent_parser = True
     resp = client.post(
         "/v1/chat/completions",
         json={
             "messages": [
                 {"role": "user", "content": "Embed: The quick brown fox jumps over the lazy dog."}
             ],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("x-rubick-mode") == "embedding"
+    assert resp.headers.get("x-rubick-hijacked") == "true"
+
+
+def test_intent_parser_can_be_disabled_via_body():
+    """Verify that passing intent_parser=False explicitly bypasses hijacking."""
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "Embed: The quick brown fox jumps over the lazy dog."}
+            ],
+            "intent_parser": False,
             "max_tokens": 5,
         },
     )
     assert resp.status_code == 200
     assert resp.headers.get("x-rubick-mode") == "chat"
     assert resp.headers.get("x-rubick-hijacked") == "false"
+
+
+def test_decision_includes_explanation_by_default():
+    """Verify that decisions include natural language explanations by default."""
+    resp = client.post(
+        "/v1/decision",
+        json={
+            "state": "The user clicked on a phishing link and input their credentials.",
+            "question": "What is the recommended action?",
+            "options": {
+                "A": "Reset Password & Revoke Sessions",
+                "B": "Ignore and Close Ticket",
+            },
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "confidence_pct" in data
+    assert 0.0 <= data["confidence_pct"] <= 100.0
+    # Explanation field is returned
+    assert "explanation" in data
