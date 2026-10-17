@@ -410,8 +410,8 @@ def test_intent_parser_can_be_disabled_via_body():
     assert resp.headers.get("x-rubick-hijacked") == "false"
 
 
-def test_decision_includes_explanation_by_default():
-    """Verify that decisions include natural language explanations by default."""
+def test_decision_pure_typed_by_default():
+    """Verify that programmatic /v1/decision stays pure, fast, and JEV-compliant by default."""
     resp = client.post(
         "/v1/decision",
         json={
@@ -425,7 +425,50 @@ def test_decision_includes_explanation_by_default():
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert "confidence_pct" in data
-    assert 0.0 <= data["confidence_pct"] <= 100.0
-    # Explanation field is returned
+    assert "best_option" in data
+    assert "probabilities" in data
+    # Explanation is omitted by default on programmatic endpoint to preserve strict schema
+    assert "explanation" not in data
+
+
+def test_decision_includes_explanation_when_requested():
+    """Verify that passing explain=True to /v1/decision adds the natural language explanation."""
+    resp = client.post(
+        "/v1/decision",
+        json={
+            "state": "The user clicked on a phishing link and input their credentials.",
+            "question": "What is the recommended action?",
+            "options": {
+                "A": "Reset Password & Revoke Sessions",
+                "B": "Ignore and Close Ticket",
+            },
+            "explain": True,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
     assert "explanation" in data
+    assert "confidence_pct" in data
+
+
+def test_chat_completions_decision_hijack_includes_explanation_by_default():
+    """Verify that /v1/chat/completions hijacked decisions include full natural explanations by default."""
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Which option is safer?\nA) Encrypted backup\nB) Plaintext backup",
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("x-rubick-mode") == "decision"
+    assert resp.headers.get("x-rubick-hijacked") == "true"
+    data = resp.json()
+    assert "decision" in data
+    assert data["decision"].get("explanation") is not None
+    # Message content contains explanation and confidence
+    assert "confidence" in data["choices"][0]["message"]["content"]

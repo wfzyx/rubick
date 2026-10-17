@@ -454,9 +454,16 @@ async def categorical_decision(request: Request):
         best_desc = options.get(best_option, "")
         confidence_pct = round(probabilities[best_option] * 100, 1)
 
-        # Generate concise natural language summary/explanation if enabled
-        should_explain = body.get("explain", body.get("include_summary", settings.explain))
-        explanation = None
+        # On programmatic /v1/decision, default to pure typed response (JEV compliant) unless explicitly requested
+        should_explain = body.get("explain", body.get("include_summary", False))
+        response_payload = {
+            "best_option": best_option,
+            "best_description": best_desc,
+            "probabilities": probabilities,
+            "question": question,
+            "options": options,
+        }
+
         if should_explain:
             explain_prompt = f"State: {state}\nDecision: Option {best_option} ({best_desc} - {confidence_pct}% confidence)\n\nExplain this decision to the user in one concise sentence:"
             try:
@@ -479,19 +486,12 @@ async def categorical_decision(request: Request):
                         .strip()
                     )
                     if exp_content:
-                        explanation = exp_content
+                        response_payload["explanation"] = exp_content
+                        response_payload["confidence_pct"] = confidence_pct
             except Exception:
-                explanation = None
+                pass
 
-        return {
-            "best_option": best_option,
-            "best_description": best_desc,
-            "probabilities": probabilities,
-            "confidence_pct": confidence_pct,
-            "explanation": explanation,
-            "question": question,
-            "options": options,
-        }
+        return response_payload
 
 
 
