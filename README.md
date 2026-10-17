@@ -268,6 +268,17 @@ cd /path/to/rubick
 uv run rubick --backend http://127.0.0.1:8080 --port 8000
 ```
 
+### 4. Optional: Enable Transparent Intent Hijacking (`--intent-parser`)
+Run Rubick with `--intent-parser` to automatically route incoming standard `/v1/chat/completions` calls to the fastest execution head:
+- **Multiple-choice / triage prompts:** Automatically hijacked to 1-token System-1 Decision (~149 ms) instead of burning hundreds of autoregressive tokens.
+- **Embedding requests (`"Embed: ..."`, `"embed: ..."`, `"vectorize: ..."`):** Automatically hijacked to 1-token PromptEOL Last-Hidden-State Embedding extraction.
+- **Conversational questions:** Transparently passed through to full autoregressive Chat.
+
+```bash
+uv run rubick --backend http://127.0.0.1:8080 --port 8000 --intent-parser
+```
+*(Every response includes `X-Rubick-Mode` and `X-Rubick-Hijacked` headers confirming the path taken).*
+
 ---
 
 ## 🧪 Benchmark Verification

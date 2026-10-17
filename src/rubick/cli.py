@@ -19,14 +19,22 @@ def main():
         default=settings.auto_guardian,
         help="Enable automatic safety pre-flight screening on chat requests",
     )
+    parser.add_argument(
+        "--intent-parser",
+        action="store_true",
+        default=settings.intent_parser,
+        help="Enable intent parser to automatically hijack and route /completions to Decision or Embedding heads",
+    )
 
     args = parser.parse_args()
     settings.llama_server_url = args.backend
     settings.auto_guardian = args.auto_guardian
+    settings.intent_parser = args.intent_parser
 
     print(f"🪄 Starting Rubick Gateway on {args.host}:{args.port}")
     print(f"🔗 Target llama-server backend: {settings.llama_server_url}")
     print(f"🛡️  Auto-Guardian pre-flight: {'ENABLED' if settings.auto_guardian else 'DISABLED'}")
+    print(f"🧠 Intent Parser auto-routing: {'ENABLED' if settings.intent_parser else 'DISABLED'}")
 
     uvicorn.run("rubick.gateway:app", host=args.host, port=args.port, reload=False)
 

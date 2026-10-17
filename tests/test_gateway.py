@@ -275,3 +275,121 @@ def test_multi_decision_bitmask():
         assert 0.0 <= prob <= 1.0
     assert "joint_probabilities" in data
     assert len(data["joint_probabilities"]) == 8  # 2^3 combinations
+
+
+
+# ---------------------------------------------------------------------------
+# 6. Intent Parser Hijacking Tests
+# ---------------------------------------------------------------------------
+
+
+def test_intent_parser_embedding_hijack():
+    """Verify that an embedding cue sent to /chat/completions is hijacked to the embedding head."""
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "Embed: The quick brown fox jumps over the lazy dog."}
+            ],
+            "intent_parser": True,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("x-rubick-mode") == "embedding"
+    assert resp.headers.get("x-rubick-hijacked") == "true"
+    data = resp.json()
+    assert data.get("rubick_routed_mode") == "embedding"
+    assert "embedding" in data
+    assert len(data["embedding"]) == 64  # stories260K dimension
+    # Unit normalized
+    norm = math.sqrt(sum(x * x for x in data["embedding"]))
+    assert abs(norm - 1.0) < 1e-4
+    assert "[Rubick: Extracted" in data["choices"][0]["message"]["content"]
+
+
+def test_intent_parser_embed_prefix_hijack():
+    """Verify that an embed: prefix (e.g. photos/files) is hijacked to the embedding head."""
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "embed: Photos/IMG_2026_Cat.jpg pet feline outdoor"}
+            ],
+            "intent_parser": True,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("x-rubick-mode") == "embedding"
+    assert resp.headers.get("x-rubick-hijacked") == "true"
+    data = resp.json()
+    assert "last_hidden_state" in data
+    assert len(data["last_hidden_state"]) == 64
+
+
+def test_intent_parser_decision_hijack():
+    """Verify that a prompt with multiple-choice options is hijacked to the decision head."""
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Which department handles payment issues?\nA) Billing\nB) Technical Support\nC) General Inquiry",
+                }
+            ],
+            "intent_parser": True,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("x-rubick-mode") == "decision"
+    assert resp.headers.get("x-rubick-hijacked") == "true"
+    data = resp.json()
+    assert data.get("rubick_routed_mode") == "decision"
+    assert "decision" in data
+    assert "probabilities" in data["decision"]
+    assert len(data["decision"]["probabilities"]) == 3
+    prob_sum = sum(data["decision"]["probabilities"].values())
+    assert abs(prob_sum - 1.0) < 1e-4
+    # The message content should lead with the selected option letter
+    content = data["choices"][0]["message"]["content"]
+    assert content[0] in ("A", "B", "C")
+
+
+def test_intent_parser_passthrough_chat():
+    """Verify that a standard conversational prompt passes through to normal autoregressive chat."""
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "Tell me a short bedtime story about a friendly robot."}
+            ],
+            "intent_parser": True,
+            "max_tokens": 5,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("x-rubick-mode") == "chat"
+    assert resp.headers.get("x-rubick-hijacked") == "false"
+    data = resp.json()
+    assert "rubick_routed_mode" not in data
+    assert "embedding" not in data
+    assert "choices" in data
+    assert len(data["choices"]) > 0
+
+
+def test_intent_parser_disabled_by_default():
+    """Verify that when intent_parser is not enabled, cues are treated as standard chat prompts."""
+    # Ensure global setting is False
+    settings.intent_parser = False
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "Embed: The quick brown fox jumps over the lazy dog."}
+            ],
+            "max_tokens": 5,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("x-rubick-mode") == "chat"
+    assert resp.headers.get("x-rubick-hijacked") == "false"

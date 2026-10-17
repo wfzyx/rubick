@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from rubick.config import settings
+from rubick.intent import detect_intent
 from rubick.normalizer import l2_normalize
 from rubick.prompts import (
     format_decision_prompt,
@@ -147,9 +148,143 @@ async def chat_completions(request: Request):
     """
     body = await request.json()
 
-    # Auto-Guardian pre-flight screening if requested or globally active
-    perform_guardian = body.get("auto_guardian", settings.auto_guardian)
+    model = body.get("model", "default")
     messages = body.get("messages", [])
+
+    # 1. Intent Hijacking (when enabled via request body or settings)
+    intent_parser_active = body.get("intent_parser", settings.intent_parser)
+    if intent_parser_active and messages:
+        intent_type, parsed_args = detect_intent(messages, body)
+
+        if intent_type == "embedding":
+            target_text = parsed_args["text"]
+            prompt = format_embedding_prompt(target_text, template=settings.embedding_prompt_template)
+            async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
+                resp = await client.post(
+                    f"{settings.llama_server_url}/v1/chat/completions",
+                    json={
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 1,
+                        "return_last_hidden_state": True,
+                        "temperature": 0.0,
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    vector = data.get("last_hidden_state")
+                    if not vector and "choices" in data and data["choices"]:
+                        msg = data["choices"][0].get("message", {})
+                        vector = msg.get("last_hidden_state")
+                    if vector:
+                        norm_vec = l2_normalize(vector)
+                        prompt_toks = data.get("usage", {}).get("prompt_tokens", len(target_text.split()))
+                        return JSONResponse(
+                            content={
+                                "id": f"chatcmpl-rubick-embed-{int(time.time()*1000)}",
+                                "object": "chat.completion",
+                                "created": int(time.time()),
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": f"[Rubick: Extracted {len(norm_vec)}-dim embedding vector]",
+                                        },
+                                        "finish_reason": "stop",
+                                    }
+                                ],
+                                "usage": {
+                                    "prompt_tokens": prompt_toks,
+                                    "completion_tokens": 1,
+                                    "total_tokens": prompt_toks + 1,
+                                },
+                                "rubick_routed_mode": "embedding",
+                                "embedding": norm_vec,
+                                "last_hidden_state": norm_vec,
+                            },
+                            headers={
+                                "X-Rubick-Mode": "embedding",
+                                "X-Rubick-Hijacked": "true",
+                            },
+                        )
+
+        elif intent_type == "decision":
+            state = parsed_args["state"]
+            question = parsed_args["question"]
+            options = parsed_args["options"]
+            prompt = format_decision_prompt(state, question, options)
+            payload = {
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1,
+                "temperature": 0.0,
+                "logprobs": True,
+                "top_logprobs": 20,
+                "chat_template_kwargs": {"enable_thinking": False},
+                "extra_body": {"enable_thinking": False},
+            }
+            async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
+                resp = await client.post(
+                    f"{settings.llama_server_url}/v1/chat/completions",
+                    json=payload,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choice = data.get("choices", [{}])[0]
+                    top_lps = (
+                        choice.get("logprobs", {})
+                        .get("content", [{}])[0]
+                        .get("top_logprobs", [])
+                    )
+                    option_logprobs = {}
+                    for item in top_lps:
+                        tok = item.get("token", "").strip().upper()
+                        if tok in options:
+                            option_logprobs[tok] = item.get("logprob", -100.0)
+                    raw_scores = {k: math.exp(option_logprobs.get(k, -100.0)) for k in options}
+                    total = sum(raw_scores.values()) or 1.0
+                    probabilities = {k: v / total for k, v in raw_scores.items()}
+                    best_opt = max(probabilities, key=probabilities.get)
+                    best_desc = options.get(best_opt, "")
+                    content_str = f"{best_opt}) {best_desc}" if best_desc else best_opt
+                    prompt_toks = data.get("usage", {}).get("prompt_tokens", 10)
+
+                    return JSONResponse(
+                        content={
+                            "id": f"chatcmpl-rubick-decision-{int(time.time()*1000)}",
+                            "object": "chat.completion",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": content_str,
+                                    },
+                                    "finish_reason": "stop",
+                                },
+                            ],
+                            "usage": {
+                                "prompt_tokens": prompt_toks,
+                                "completion_tokens": 1,
+                                "total_tokens": prompt_toks + 1,
+                            },
+                            "rubick_routed_mode": "decision",
+                            "decision": {
+                                "best_option": best_opt,
+                                "best_description": best_desc,
+                                "probabilities": probabilities,
+                            },
+                        },
+                        headers={
+                            "X-Rubick-Mode": "decision",
+                            "X-Rubick-Hijacked": "true",
+                        },
+                    )
+
+    # 2. Auto-Guardian pre-flight screening if requested or globally active
+    perform_guardian = body.get("auto_guardian", settings.auto_guardian)
 
     if perform_guardian and messages:
         last_user_msg = next(
@@ -197,6 +332,10 @@ async def chat_completions(request: Request):
             content=resp.content,
             status_code=resp.status_code,
             media_type=resp.headers.get("content-type", "application/json"),
+            headers={
+                "X-Rubick-Mode": "chat",
+                "X-Rubick-Hijacked": "false",
+            },
         )
 
 
