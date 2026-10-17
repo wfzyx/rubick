@@ -7,54 +7,59 @@
 
 ## ⚡ The Big Idea: Zero Adapters Required
 
-**Rubick runs 100% out-of-the-box on any standard GGUF model** (e.g., FrogNano, Qwen 2.5, LLaMA 3, Mistral).
+**Rubick runs out-of-the-box on your base model** (empirically tested and benchmarked live on FrogNano 4B).
 
 You do **not** need to train or load any LoRA adapters to get all 4 capabilities:
-- **Chat:** Standard autoregressive generation.
+- **Chat:** Standard autoregressive generation with streaming SSE chunks.
+- **Decisions & Autonomous Triage:** Recursive option extraction + 1-token logprob scoring with calibrated softmax over options, followed by an automatic natural language explanation.
+- **Safety / Guardian:** Rapid prompt-based moderation and risk screening.
 - **Embeddings:** NuMind / PromptEOL 1-token summary prompt extracting the model's last hidden state $\vec{h} \in \mathbb{R}^{d}$.
-- **Decisions:** 1-token logprob scoring with calibrated softmax over option keys.
-- **Safety:** Rapid prompt-based moderation and risk screening.
 
 ### The Optional `RBK` Adapter Series (Precision Boosters)
-While the base model handles all 4 roles natively, you can attach optional **Activated LoRA (aLoRA)** adapters to boost domain precision:
+While the unmodified base model handles all 4 roles natively, you can optionally attach specialized **Activated LoRA (aLoRA)** adapters to boost domain precision:
 - **`RBK-D` (Decision Booster):** Specialized aLoRA that eliminates label position bias and guarantees mathematically calibrated probabilities on complex multiple-choice routing.
 - **`RBK-G` (Guardian Booster):** Specialized aLoRA fine-tuned on adversarial attack datasets to resist jailbreaks and output strict JSON verdicts.
 - **`RBK-Z` (The Grand Magus - Unified Booster):** A single composite ~30 MB aLoRA combining both Decision and Guardian capabilities in one file.
 
+👉 **Want to train your own adapters?** Step-by-step consumer GPU recipes (running on 8GB VRAM) are documented in [**Training Custom aLoRA Adapters on Consumer Hardware**](docs/training_alora_recipes.md).
+
 Because aLoRA adapters stay dormant until triggered by their control tokens (`<|decision|>`, `<|guardian|>`), they **recycle the base model's KV cache** with zero recomputation.
 
 ---
-
 ## 🏛️ Architecture Overview
 
 ```
                                 Client Application
+                         (pi, OpenCode, cURL, OpenAI SDK)
                                         │
                          OpenAI API (Chat, Embeddings, Decisions)
                                         │
-                             ┌──────────▼──────────┐
-                             │    Rubick Gateway   │
-                             │    (FastAPI / Py)   │
-                             └──────────┬──────────┘
+                         ┌──────────────▼──────────────┐
+                         │   Rubick Gateway (Docker)   │
+                         │      (FastAPI / Python)     │
+                         └──────────────┬──────────────┘
                                         │
          ┌──────────────────────────────┼──────────────────────────────┐
          ▼                              ▼                              ▼
-  [1. Chat Mode]               [2. Decision Mode]            [4. Embedding Mode]
-  - Normal decode              - max_tokens: 1               - PromptEOL framing
-  - Full text stream           - Option logprob softmax      - max_tokens: 1
-                               - Single-pass ($O(1)$)        - Extract last hidden state
-                                        │                    - L2-normalize vector
-                                        ▼
-                             [3. Safety / Guardian]
-                             - Auto pre-flight filter
-                             - Shared prompt KV cache
+  [1. Chat Mode]               [2. Decision Pipeline]         [3. Embedding Mode]
+  - Full text decode           Step 1: Recursive LLM Parser   - PromptEOL 1-token
+  - SSE streaming chunks         (Extracts options as JSON)   - Extracts last hidden
+                               Step 2: 1-Token Logprob Pass     state vector
+                                 (Computes calibrated probs)  - L2-normalized
+                               Step 3: System-2 Explainer
+                                 (Concise warm KV summary)
                                         │
                                         ▼
-                          ┌───────────────────────────┐
-                          │       llama-server        │
-                          │   (Single Model in VRAM)  │
-                          │   --embedding --pooling none
-                          └───────────────────────────┘
+                               [4. Safety / Guardian]
+                               - Auto pre-flight filter
+                               - Shared prompt KV cache
+                                        │
+                                        ▼
+                         ┌─────────────────────────────┐
+                         │        llama-server         │
+                         │    (Single Model in VRAM)   │
+                         │    --embedding --pooling none
+                         └─────────────────────────────┘
 ```
 
 ---
@@ -239,85 +244,43 @@ print(summary)
 ```
 
 ---
+
 ## 🛠️ Quickstart
 
-### 1. Requirements & Prerequisites
-- Python 3.12+ (managed with `uv`)
-- `llama.cpp` built from the Rubick feature branch:
-  ```bash
-  git clone -b feat/last-hidden-state https://github.com/wfzyx/llama.cpp.git
-  cd llama.cpp
-  cmake -B build -G Ninja -DLLAMA_BUILD_SERVER=ON
-  ninja -C build llama-server
-  ```
-
-### 2. Start `llama-server`
-Launch `llama-server` with `--embedding --pooling none`. This keeps the engine in generative mode while enabling per-token hidden state extraction:
+### 1. Run with Docker (Recommended)
+The fastest way to deploy Rubick locally. The container runs an unprivileged, non-root Python runtime and reads configuration through environment variables:
 
 ```bash
-cd /path/to/llama.cpp
-./build/bin/llama-server \
-    -m ./models/frognano-4b-q6_k.gguf \
-    --embedding --pooling none \
-    --port 8080
-```
+# Clone repository
+git clone https://github.com/wfzyx/rubick.git
+cd rubick
 
-### 3. Start Rubick Gateway
-```bash
-cd /path/to/rubick
-uv run rubick --backend http://127.0.0.1:8080 --port 8000
-```
-
-### 4. Intelligent Intent Auto-Routing & Natural Explanations (Enabled by Default)
-Rubick runs with `--intent-parser` and `--explain` enabled out of the box:
-- **Multiple-choice / triage prompts:** Evaluates the mathematical decision in a **1-token forward pass (~149 ms)**, then attaches a concise natural language explanation from the chat head using the warmed prompt KV cache.
-- **Embedding requests (`"Embed: ..."`, `"embed: ..."`, `"vectorize: ..."`):** Automatically hijacked to 1-token PromptEOL Last-Hidden-State Embedding extraction.
-- **Conversational questions:** Transparently passed through to full autoregressive Chat.
-
-```bash
-# Enabled by default:
-uv run rubick --backend http://127.0.0.1:8080 --port 8000
-
-# To disable auto-routing or explanations:
-uv run rubick --backend http://127.0.0.1:8080 --port 8000 --no-intent-parser --no-explain
-```
-*(Every response includes `X-Rubick-Mode`, `X-Rubick-Hijacked`, and `X-Rubick-Explained` headers confirming the path taken).*
-
----
-
-### 5. Run Rubick with Docker
-The fastest way to try Rubick without installing Python/`uv` locally. All configuration is passed via environment variables — **you only need to tell the container which `llama-server` to proxy**.
-
-#### Build the image
-```bash
-cd /path/to/rubick
+# Build container image
 docker build -t rubick .
-```
 
-#### Run it, pointing at your llama-server
-```bash
-# llama-server running on another machine on your LAN (e.g. the "tower"):
+# Run pointing at your llama-server backend (e.g. your local host or LAN address)
 docker run -d --name rubick \
   -p 8000:8000 \
   -e LLAMA_SERVER_URL=http://192.168.0.9:8080 \
   rubick
-
-# llama-server running on the Docker host itself (Linux needs --add-host):
-docker run -d --name rubick \
-  -p 8000:8000 \
-  --add-host=host.docker.internal:host-gateway \
-  -e LLAMA_SERVER_URL=http://host.docker.internal:8080 \
-  rubick
 ```
 
-#### Or with Docker Compose
+*(On Linux when `llama-server` is running on `localhost:8080`, pass `--add-host=host.docker.internal:host-gateway` and set `LLAMA_SERVER_URL=http://host.docker.internal:8080`).*
+
+Or with **Docker Compose**:
 ```bash
 cp .env.example .env
-# edit .env and set LLAMA_SERVER_URL to your llama-server
+# Edit .env and set LLAMA_SERVER_URL=...
 docker compose --env-file .env up -d
 ```
 
-#### All supported environment variables
+Verify the gateway is live and connected:
+```bash
+curl http://localhost:8000/health
+# => {"status":"ok","backend":"http://192.168.0.9:8080","backend_online":true,"features":{"chat":true,"embeddings":true,"decisions":true,"guardian":true}}
+```
+
+#### Environment Configuration
 | Variable | Default | Description |
 |---|---|---|
 | `LLAMA_SERVER_URL` | `http://host.docker.internal:8080` | **Required.** URL of the `llama-server` backend to proxy. |
@@ -328,18 +291,133 @@ docker compose --env-file .env up -d
 | `RUBICK_EXPLAIN` | `true` | Attach natural language explanations to hijacked decisions on `/v1/chat/completions`. |
 | `RUBICK_TIMEOUT` | `60.0` | Backend request timeout in seconds. |
 
-Any CLI flag also works by appending it after the image name, which takes precedence over the environment variables above, e.g. `docker run rubick --backend http://192.168.0.9:8080 --no-explain`.
+---
 
-Verify it's up and talking to your backend:
+### 2. Autonomous Decision Showcase (Extraction + Decision Taking + Summary)
+
+When calling standard `/v1/chat/completions`, Rubick enables **`--intent-parser`** and **`--explain`** out of the box. You do **not** need to format questions with rigid `A)` or `B)` options. The engine autonomously:
+1. **Recursively parses options & questions** using the LLM into structured choices (zero fragile regexes).
+2. **Takes the decision in 1 token** using the System-1 Decision Head (softmax over candidate logits).
+3. **Decodes a concise 1-sentence natural summary** using the warm prompt KV cache.
+
+#### Example A: Freeform Bulleted Choices (Diet & Health Triage)
 ```bash
-curl http://localhost:8000/health
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": "decision: which of these should I eat\n\n- pizza\n- sushi\n- salad"
+      }
+    ]
+  }' | jq '{content: .choices[0].message.content, decision: .decision}'
+```
+
+**Response (~1.4s total):**
+```json
+{
+  "content": "C) salad (84.9% confidence) — You should choose the salad because it is the only option listed that is a healthy, low-calorie meal with high satiety compared to pizza and sushi.",
+  "decision": {
+    "best_option": "C",
+    "best_description": "salad",
+    "confidence_pct": 84.9,
+    "probabilities": {
+      "A": 0.00001,
+      "B": 0.1513,
+      "C": 0.8486
+    },
+    "explanation": "You should choose the salad because it is the only option listed that is a healthy, low-calorie meal with high satiety compared to pizza and sushi."
+  }
+}
+```
+
+#### Example B: Natural Language Inline Decision (Cloud Infrastructure)
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": "Should I pick AWS, GCP, or Azure for high-throughput video streaming?"
+      }
+    ]
+  }' | jq .choices[0].message.content
+```
+**Output:**
+```
+"A) AWS (96.6% confidence) — AWS is the recommended choice due to its dominant global edge infrastructure and mature managed video streaming services."
+```
+
+#### Example C: Architecture / Language Selection
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": "What should I choose between Rust or Go for writing our high-concurrency network proxy?"
+      }
+    ]
+  }' | jq .choices[0].message.content
+```
+**Output:**
+```
+"A) Rust (88.2% confidence) — Rust is better suited for high-concurrency proxies where zero-cost abstractions, zero garbage collection pauses, and memory safety are paramount."
+```
+
+*(Non-decision prompts like general questions, instructions, notes, and todo lists return `{"is_decision": false}` and pass through to standard autoregressive Chat).*
+
+---
+
+### 3. Local Native Run (Python / `uv`)
+For developers modifying Rubick source code:
+```bash
+git clone https://github.com/wfzyx/rubick.git
+cd rubick
+
+# Install dependencies in virtual environment
+uv sync
+
+# Run Rubick Gateway (Intent Auto-Routing and Explanations enabled by default)
+uv run rubick --backend http://127.0.0.1:8080 --port 8000
+
+# Disable auto-routing or explanations if pure raw token throughput is needed:
+uv run rubick --backend http://127.0.0.1:8080 --port 8000 --no-intent-parser --no-explain
+```
+
+---
+
+### 4. Backend Engine (`llama.cpp`) Compatibility & Setup
+
+| Capability | Upstream `llama.cpp` Status | Notes |
+|---|---|---|
+| **Generative Chat** (`/v1/chat/completions`) | **Stock upstream** (any build) | Uses standard decodes with SSE streaming. |
+| **System-1 Decisions** (`/v1/decision`) | **Stock upstream** (any build) | Uses standard OpenAI `logprobs: true, top_logprobs: 20`. |
+| **Natural Explanations** (`--explain`) | **Stock upstream** (any build) | Reuses prompt KV cache; 1-sentence completion. |
+| **Safety / Guardian** | **Stock upstream** (any build) | Rapid screening pass. |
+| **Single-Model Embeddings** (`/v1/embeddings`) | **Rubick Feature Branch** ([PR #30732](https://github.com/ggml-org/llama.cpp/pull/30732)) | Requires launching `llama-server --embedding --pooling none`. |
+
+To build the patched `llama.cpp` engine supporting inline embeddings without duplicate VRAM:
+```bash
+git clone -b feat/last-hidden-state https://github.com/wfzyx/llama.cpp.git
+cd llama.cpp
+cmake -B build -G Ninja -DLLAMA_BUILD_SERVER=ON
+ninja -C build llama-server
+
+./build/bin/llama-server \
+  -m /path/to/model.gguf \
+  --embedding --pooling none \
+  --port 8080
 ```
 
 ---
 
 ## 🧪 Benchmark Verification
 
-Run the end-to-end integration and benchmark suite:
+Run the comprehensive test suite (unit tests, concurrent mixed loads, bitmask deciders, recursive option extractors, and live tower tests):
 
 ```bash
 uv run pytest -v -s
@@ -355,14 +433,26 @@ tests/test_gateway.py::test_chat_generation PASSED
 tests/test_gateway.py::test_guardian_screening_benign PASSED
 tests/test_gateway.py::test_concurrent_mixed_workload PASSED (156 req/s mixed throughput)
 tests/test_gateway.py::test_multi_decision_bitmask PASSED (Bitmask marginalization)
+tests/test_gateway.py::test_intent_parser_embedding_hijack PASSED
+tests/test_gateway.py::test_intent_parser_embed_prefix_hijack PASSED
+tests/test_gateway.py::test_intent_parser_decision_hijack PASSED
+tests/test_gateway.py::test_intent_parser_passthrough_chat PASSED
+tests/test_gateway.py::test_intent_parser_enabled_by_default PASSED
+tests/test_gateway.py::test_intent_parser_can_be_disabled_via_body PASSED
+tests/test_gateway.py::test_decision_pure_typed_by_default PASSED (JEV compliance)
+tests/test_gateway.py::test_decision_includes_explanation_when_requested PASSED
+tests/test_gateway.py::test_chat_completions_decision_hijack_includes_explanation_by_default PASSED
+tests/test_gateway.py::test_intent_parser_generic_markdown_list_stays_chat PASSED
 tests/test_tower.py::test_tower_frognano_chat PASSED (Live Tower FrogNano)
 tests/test_tower.py::test_tower_frognano_decision PASSED (Live Tower FrogNano)
+tests/test_tower.py::test_tower_recursive_llm_decision_extraction PASSED (Live Tower FrogNano)
+tests/test_tower.py::test_tower_end_to_end_decision_bulleted_list PASSED (Live Tower FrogNano)
+tests/test_tower.py::test_tower_end_to_end_decision_inline_alternatives PASSED (Live Tower FrogNano)
 
-======================== 13 passed in 5.30s =========================
+======================== 26 passed in 8.96s =========================
 ```
 
 ---
-
 ## 📚 Technical Documentation & Prior Art
 - [Training Custom aLoRA Adapters on Consumer Hardware](docs/training_alora_recipes.md)
 - [NuMind vLLM PR #57185](https://github.com/vllm-project/vllm/pull/57185) & [vLLM-Last-Hidden-State](https://github.com/numindai/vLLM-Last-Hidden-State)
