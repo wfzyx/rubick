@@ -243,7 +243,13 @@ print(summary)
 
 ### 1. Requirements & Prerequisites
 - Python 3.12+ (managed with `uv`)
-- `llama.cpp` built from the Rubick feature branch (`feat/last-hidden-state`)
+- `llama.cpp` built from the Rubick feature branch:
+  ```bash
+  git clone -b feat/last-hidden-state https://github.com/wfzyx/llama.cpp.git
+  cd llama.cpp
+  cmake -B build -G Ninja -DLLAMA_BUILD_SERVER=ON
+  ninja -C build llama-server
+  ```
 
 ### 2. Start `llama-server`
 Launch `llama-server` with `--embedding --pooling none`. This keeps the engine in generative mode while enabling per-token hidden state extraction:
@@ -290,5 +296,8 @@ tests/test_tower.py::test_tower_frognano_decision PASSED (Live Tower FrogNano)
 
 ---
 
-## 📚 Technical Documentation
+## 📚 Technical Documentation & Prior Art
 - [Training Custom aLoRA Adapters on Consumer Hardware](docs/training_alora_recipes.md)
+- [NuMind vLLM PR #57185](https://github.com/vllm-project/vllm/pull/57185) & [vLLM-Last-Hidden-State](https://github.com/numindai/vLLM-Last-Hidden-State)
+- [Activated LoRA (aLoRA): Fine-tuned LLMs for Intrinsics (NeurIPS 2025)](https://arxiv.org/abs/2504.12397)
+- [Rubick llama.cpp Engine Fork (feat/last-hidden-state)](https://github.com/wfzyx/llama.cpp/tree/feat/last-hidden-state)
