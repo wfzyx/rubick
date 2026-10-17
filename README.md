@@ -285,6 +285,58 @@ uv run rubick --backend http://127.0.0.1:8080 --port 8000 --no-intent-parser --n
 
 ---
 
+### 5. Run Rubick with Docker
+The fastest way to try Rubick without installing Python/`uv` locally. All configuration is passed via environment variables — **you only need to tell the container which `llama-server` to proxy**.
+
+#### Build the image
+```bash
+cd /path/to/rubick
+docker build -t rubick .
+```
+
+#### Run it, pointing at your llama-server
+```bash
+# llama-server running on another machine on your LAN (e.g. the "tower"):
+docker run -d --name rubick \
+  -p 8000:8000 \
+  -e LLAMA_SERVER_URL=http://192.168.0.9:8080 \
+  rubick
+
+# llama-server running on the Docker host itself (Linux needs --add-host):
+docker run -d --name rubick \
+  -p 8000:8000 \
+  --add-host=host.docker.internal:host-gateway \
+  -e LLAMA_SERVER_URL=http://host.docker.internal:8080 \
+  rubick
+```
+
+#### Or with Docker Compose
+```bash
+cp .env.example .env
+# edit .env and set LLAMA_SERVER_URL to your llama-server
+docker compose --env-file .env up -d
+```
+
+#### All supported environment variables
+| Variable | Default | Description |
+|---|---|---|
+| `LLAMA_SERVER_URL` | `http://host.docker.internal:8080` | **Required.** URL of the `llama-server` backend to proxy. |
+| `RUBICK_HOST` | `0.0.0.0` | Bind host inside the container. |
+| `RUBICK_PORT` | `8000` | Bind port inside the container (publish with `-p <host_port>:8000`). |
+| `RUBICK_AUTO_GUARDIAN` | `false` | Enable automatic safety pre-flight screening on chat requests. |
+| `RUBICK_INTENT_PARSER` | `true` | Enable transparent intent auto-routing (Decision/Embedding head hijacking). |
+| `RUBICK_EXPLAIN` | `true` | Attach natural language explanations to hijacked decisions on `/v1/chat/completions`. |
+| `RUBICK_TIMEOUT` | `60.0` | Backend request timeout in seconds. |
+
+Any CLI flag also works by appending it after the image name, which takes precedence over the environment variables above, e.g. `docker run rubick --backend http://192.168.0.9:8080 --no-explain`.
+
+Verify it's up and talking to your backend:
+```bash
+curl http://localhost:8000/health
+```
+
+---
+
 ## 🧪 Benchmark Verification
 
 Run the end-to-end integration and benchmark suite:

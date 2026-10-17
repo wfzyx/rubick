@@ -1,0 +1,29 @@
+services:
+  rubick:
+    build: .
+    image: rubick:latest
+    container_name: rubick-gateway
+    ports:
+      - "${RUBICK_PORT:-8000}:8000"
+    environment:
+      # Point this at your llama-server instance. On Linux, replace
+      # host.docker.internal with the host's LAN IP (e.g. 192.168.0.9:8080)
+      # or run both containers on the same user-defined bridge network.
+      LLAMA_SERVER_URL: "${LLAMA_SERVER_URL:-http://host.docker.internal:8080}"
+      RUBICK_HOST: "0.0.0.0"
+      RUBICK_PORT: "8000"
+      RUBICK_AUTO_GUARDIAN: "${RUBICK_AUTO_GUARDIAN:-false}"
+      RUBICK_INTENT_PARSER: "${RUBICK_INTENT_PARSER:-true}"
+      RUBICK_EXPLAIN: "${RUBICK_EXPLAIN:-true}"
+      RUBICK_TIMEOUT: "${RUBICK_TIMEOUT:-60.0}"
+    extra_hosts:
+      # Required on Linux so host.docker.internal resolves to the Docker host.
+      # Not needed on Docker Desktop (macOS/Windows), where it works out of the box.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
