@@ -9,7 +9,12 @@ from fastapi.responses import JSONResponse, Response
 
 from rubick.config import settings
 from rubick.normalizer import l2_normalize
-from rubick.prompts import format_decision_prompt, format_embedding_prompt, format_guardian_prompt
+from rubick.prompts import (
+    format_decision_prompt,
+    format_embedding_prompt,
+    format_guardian_prompt,
+    format_multi_decision_prompt,
+)
 
 app = FastAPI(
     title="Rubick Gateway",
@@ -216,6 +221,8 @@ async def categorical_decision(request: Request):
         "temperature": 0.0,
         "logprobs": True,
         "top_logprobs": 20,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "extra_body": {"enable_thinking": False},
     }
 
     async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
@@ -257,4 +264,93 @@ async def categorical_decision(request: Request):
             "probabilities": probabilities,
             "question": question,
             "options": options,
+        }
+
+
+
+@app.post("/v1/decision/multi")
+async def multi_decision_bitmask(request: Request):
+    """
+    Multi-statement Bitmask Decision endpoint.
+    Answers up to 5 binary (True/False) questions simultaneously in ONE forward pass.
+    Maps 2^N states to 2^N options, then marginalizes bit probabilities.
+    """
+    body = await request.json()
+    state = body.get("state", "")
+    questions = body.get("questions", [])
+
+    if not questions or not isinstance(questions, list):
+        raise HTTPException(status_code=400, detail="Missing or invalid 'questions' list")
+
+    if len(questions) > 5:
+        raise HTTPException(status_code=400, detail="Maximum 5 questions supported in one bitmask pass")
+
+    n = len(questions)
+    num_combinations = 1 << n  # 2^N
+
+    # Generate labels: A, B, C... and their binary representations (e.g., 000, 001...)
+    bitmask_options = {}
+    for i in range(num_combinations):
+        label = chr(ord("A") + i)
+        binary_str = format(i, f"0{n}b")
+        bitmask_options[label] = binary_str
+
+    prompt = format_multi_decision_prompt(state, questions, bitmask_options)
+    payload = {
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1,
+        "temperature": 0.0,
+        "logprobs": True,
+        "top_logprobs": min(num_combinations + 10, 50),
+        "chat_template_kwargs": {"enable_thinking": False},
+        "extra_body": {"enable_thinking": False},
+    }
+
+    async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
+        resp = await client.post(
+            f"{settings.llama_server_url}/v1/chat/completions",
+            json=payload,
+        )
+
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail=f"Backend error from llama-server: {resp.text}",
+            )
+
+        data = resp.json()
+        choice = data.get("choices", [{}])[0]
+        top_lps = (
+            choice.get("logprobs", {})
+            .get("content", [{}])[0]
+            .get("top_logprobs", [])
+        )
+
+        # Map logprobs to option keys
+        option_logprobs = {}
+        for item in top_lps:
+            tok = item.get("token", "").strip().upper()
+            if tok in bitmask_options:
+                option_logprobs[tok] = item.get("logprob", -100.0)
+
+        # Joint Softmax over all 2^N combinations
+        raw_scores = {k: math.exp(option_logprobs.get(k, -100.0)) for k in bitmask_options}
+        total = sum(raw_scores.values()) or 1.0
+        joint_probs = {k: v / total for k, v in raw_scores.items()}
+
+        # Marginalize each question's probability
+        # P(question_i == True) = sum of P(label) where bit i of label is '1'
+        marginal_results = {}
+        for q_idx, q_text in enumerate(questions):
+            p_true = sum(
+                joint_probs[label]
+                for label, bstr in bitmask_options.items()
+                if bstr[q_idx] == "1"
+            )
+            marginal_results[q_text] = round(p_true, 4)
+
+        return {
+            "results": marginal_results,
+            "questions": questions,
+            "joint_probabilities": joint_probs,
         }

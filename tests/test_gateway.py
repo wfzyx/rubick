@@ -252,3 +252,26 @@ async def test_concurrent_mixed_workload():
             assert r.status_code == 200, f"Request {idx} failed with {r.status_code}: {r.text}"
 
         print(f"\n⚡ Completed 10 concurrent mixed requests in {elapsed * 1000:.2f} ms ({len(tasks) / elapsed:.1f} req/s)")
+
+
+
+def test_multi_decision_bitmask():
+    resp = client.post(
+        "/v1/decision/multi",
+        json={
+            "state": "URGENT: Your account was suspended due to suspicious activity. Verify login immediately.",
+            "questions": [
+                "Is this urgent?",
+                "Is this related to security?",
+                "Is this a recipe?",
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "results" in data
+    assert len(data["results"]) == 3
+    for q, prob in data["results"].items():
+        assert 0.0 <= prob <= 1.0
+    assert "joint_probabilities" in data
+    assert len(data["joint_probabilities"]) == 8  # 2^3 combinations
