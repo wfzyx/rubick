@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 @dataclass
 class Settings:
     llama_server_url: str = field(
-        default_factory=lambda: os.getenv("LLAMA_SERVER_URL", "http://127.0.0.1:8999")
+        default_factory=lambda: os.getenv("LLAMA_SERVER_URL", "http://192.168.0.9:8080")
     )
     gateway_host: str = field(
         default_factory=lambda: os.getenv("RUBICK_HOST", "0.0.0.0")
