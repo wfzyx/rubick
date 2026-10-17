@@ -153,6 +153,23 @@ def parse_explicit_options(
     return None
 
 
+def extract_text_from_message_content(content: Any) -> str:
+    """Extract plain text string from str or list of content blocks (OpenAI multimodal format)."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text" and "text" in item:
+                    parts.append(str(item["text"]))
+                elif "text" in item:
+                    parts.append(str(item["text"]))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts).strip()
+    return ""
+
 async def detect_intent(
     messages: list[dict[str, Any]],
     body: dict[str, Any] | None = None,
@@ -167,9 +184,11 @@ async def detect_intent(
     """
     last_user_msg = ""
     for m in reversed(messages):
-        if m.get("role") == "user" and isinstance(m.get("content"), str):
-            last_user_msg = m["content"].strip()
-            break
+        if m.get("role") == "user":
+            extracted = extract_text_from_message_content(m.get("content"))
+            if extracted:
+                last_user_msg = extracted
+                break
 
     # 1. Embedding check
     embed_target = check_embedding_intent(last_user_msg, body)

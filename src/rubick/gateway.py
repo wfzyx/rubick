@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from rubick.config import settings
 from rubick.intent import detect_intent
@@ -150,6 +150,7 @@ async def chat_completions(request: Request):
 
     model = body.get("model", "default")
     messages = body.get("messages", [])
+    is_stream = bool(body.get("stream", False))
 
     # 1. Intent Hijacking (when enabled via request body or settings)
     intent_parser_active = body.get("intent_parser", settings.intent_parser)
@@ -300,6 +301,64 @@ async def chat_completions(request: Request):
                     confidence = str(parsed_args.get("confidence", 1.0))
                     completion_toks = len(content_str.split())
 
+                    decision_payload = {
+                        "best_option": best_opt,
+                        "best_description": best_desc,
+                        "probabilities": probabilities,
+                        "confidence_pct": confidence_pct,
+                        "explanation": explanation or None,
+                    }
+
+                    headers = {
+                        "X-Rubick-Mode": "decision",
+                        "X-Rubick-Hijacked": "true",
+                        "X-Rubick-Intent-Source": source,
+                        "X-Rubick-Intent-Confidence": confidence,
+                        "X-Rubick-Explained": "true" if explanation else "false",
+                    }
+
+                    if is_stream:
+                        req_id = f"chatcmpl-rubick-decision-{int(time.time()*1000)}"
+                        chunk1 = {
+                            "id": req_id,
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"role": "assistant", "content": content_str},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        chunk2 = {
+                            "id": req_id,
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop",
+                                }
+                            ],
+                            "rubick_routed_mode": "decision",
+                            "decision": decision_payload,
+                        }
+
+                        async def sse_gen():
+                            yield f"data: {json.dumps(chunk1)}\n\n"
+                            yield f"data: {json.dumps(chunk2)}\n\n"
+                            yield "data: [DONE]\n\n"
+
+                        return StreamingResponse(
+                            sse_gen(),
+                            media_type="text/event-stream",
+                            headers=headers,
+                        )
+
                     return JSONResponse(
                         content={
                             "id": f"chatcmpl-rubick-decision-{int(time.time()*1000)}",
@@ -322,21 +381,9 @@ async def chat_completions(request: Request):
                                 "total_tokens": prompt_toks + completion_toks,
                             },
                             "rubick_routed_mode": "decision",
-                            "decision": {
-                                "best_option": best_opt,
-                                "best_description": best_desc,
-                                "probabilities": probabilities,
-                                "confidence_pct": confidence_pct,
-                                "explanation": explanation or None,
-                            },
+                            "decision": decision_payload,
                         },
-                        headers={
-                            "X-Rubick-Mode": "decision",
-                            "X-Rubick-Hijacked": "true",
-                            "X-Rubick-Intent-Source": source,
-                            "X-Rubick-Intent-Confidence": confidence,
-                            "X-Rubick-Explained": "true" if explanation else "false",
-                        },
+                        headers=headers,
                     )
     # 2. Auto-Guardian pre-flight screening if requested or globally active
     perform_guardian = body.get("auto_guardian", settings.auto_guardian)
@@ -378,11 +425,26 @@ async def chat_completions(request: Request):
                         )
 
     # Proxy request to llama-server
-    async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
+    client = httpx.AsyncClient(timeout=settings.timeout_seconds)
+    if is_stream:
+        req = client.build_request("POST", f"{settings.llama_server_url}/v1/chat/completions", json=body)
+        resp = await client.send(req, stream=True)
+        return StreamingResponse(
+            resp.aiter_raw(),
+            status_code=resp.status_code,
+            media_type="text/event-stream",
+            headers={
+                "X-Rubick-Mode": "chat",
+                "X-Rubick-Hijacked": "false",
+            },
+            background=client.aclose,
+        )
+    else:
         resp = await client.post(
             f"{settings.llama_server_url}/v1/chat/completions",
             json=body,
         )
+        await client.aclose()
         return Response(
             content=resp.content,
             status_code=resp.status_code,
