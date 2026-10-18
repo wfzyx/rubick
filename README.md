@@ -359,3 +359,19 @@ tests/test_tower.py::test_tower_frognano_decision PASSED (Live Tower FrogNano)
 - [NuMind vLLM PR #57185](https://github.com/vllm-project/vllm/pull/57185) & [vLLM-Last-Hidden-State](https://github.com/numindai/vLLM-Last-Hidden-State)
 - [Activated LoRA (aLoRA): Fine-tuned LLMs for Intrinsics (NeurIPS 2025)](https://arxiv.org/abs/2504.12397)
 - [Rubick llama.cpp Engine Fork (feat/last-hidden-state)](https://github.com/wfzyx/llama.cpp/tree/feat/last-hidden-state)
+
+---
+
+## 📖 Citation
+
+If you use Rubick in your research, benchmarks, or agent infrastructure, please cite:
+
+```bibtex
+@software{rubick2026,
+  author = {wfzyx},
+  title = {Rubick: Unified Single-Model AI Gateway for Chat, Embeddings, Decisions, and Safety Guardrails},
+  year = {2026},
+  url = {https://github.com/wfzyx/rubick},
+  version = {0.1.0}
+}
+```
