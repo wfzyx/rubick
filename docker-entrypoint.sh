@@ -29,15 +29,6 @@ case "$(printf '%s' "${RUBICK_AUTO_GUARDIAN:-false}" | tr '[:upper:]' '[:lower:]
     true|1|yes) ARGS="$ARGS --auto-guardian" ;;
 esac
 
-case "$(printf '%s' "${RUBICK_INTENT_PARSER:-true}" | tr '[:upper:]' '[:lower:]')" in
-    true|1|yes) ARGS="$ARGS --intent-parser" ;;
-    *) ARGS="$ARGS --no-intent-parser" ;;
-esac
-
-case "$(printf '%s' "${RUBICK_EXPLAIN:-true}" | tr '[:upper:]' '[:lower:]')" in
-    true|1|yes) ARGS="$ARGS --explain" ;;
-    *) ARGS="$ARGS --no-explain" ;;
-esac
 
 # shellcheck disable=SC2086
 exec rubick $ARGS "$@"

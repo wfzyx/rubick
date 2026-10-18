@@ -11,7 +11,7 @@
 
 You do **not** need to train or load any LoRA adapters to get all 4 capabilities:
 - **Chat:** Standard autoregressive generation with streaming SSE chunks.
-- **Decisions & Autonomous Triage:** Recursive option extraction + 1-token logprob scoring with calibrated softmax over options, followed by an automatic natural language explanation.
+- **Decisions:** 1-token logprob scoring with calibrated softmax over option keys via `/v1/decision` and multi-option bitmasking via `/v1/decision/multi`.
 - **Safety / Guardian:** Rapid prompt-based moderation and risk screening.
 - **Embeddings:** NuMind / PromptEOL 1-token summary prompt extracting the model's last hidden state $\vec{h} \in \mathbb{R}^{d}$.
 
@@ -41,17 +41,14 @@ Because aLoRA adapters stay dormant until triggered by their control tokens (`<|
                                         │
          ┌──────────────────────────────┼──────────────────────────────┐
          ▼                              ▼                              ▼
-  [1. Chat Mode]               [2. Decision Pipeline]         [3. Embedding Mode]
-  - Full text decode           Step 1: Recursive LLM Parser   - PromptEOL 1-token
-  - SSE streaming chunks         (Extracts options as JSON)   - Extracts last hidden
-                               Step 2: 1-Token Logprob Pass     state vector
-                                 (Computes calibrated probs)  - L2-normalized
-                               Step 3: System-2 Explainer
-                                 (Concise warm KV summary)
+  [1. Chat Mode]               [2. Decision Mode]             [3. Embedding Mode]
+  - Full text decode           - 1-token logprob pass         - PromptEOL 1-token
+  - SSE streaming chunks       - Softmax over options         - Last hidden state
+                               - Bitmask marginalization      - L2-normalized
                                         │
                                         ▼
                                [4. Safety / Guardian]
-                               - Auto pre-flight filter
+                               - Optional auto pre-flight
                                - Shared prompt KV cache
                                         │
                                         ▼
@@ -287,92 +284,10 @@ curl http://localhost:8000/health
 | `RUBICK_HOST` | `0.0.0.0` | Bind host inside the container. |
 | `RUBICK_PORT` | `8000` | Bind port inside the container (publish with `-p <host_port>:8000`). |
 | `RUBICK_AUTO_GUARDIAN` | `false` | Enable automatic safety pre-flight screening on chat requests. |
-| `RUBICK_INTENT_PARSER` | `true` | Enable transparent intent auto-routing (Decision/Embedding head hijacking). |
-| `RUBICK_EXPLAIN` | `true` | Attach natural language explanations to hijacked decisions on `/v1/chat/completions`. |
 | `RUBICK_TIMEOUT` | `60.0` | Backend request timeout in seconds. |
 
 ---
-
-### 2. Autonomous Decision Showcase (Extraction + Decision Taking + Summary)
-
-When calling standard `/v1/chat/completions`, Rubick enables **`--intent-parser`** and **`--explain`** out of the box. You do **not** need to format questions with rigid `A)` or `B)` options. The engine autonomously:
-1. **Recursively parses options & questions** using the LLM into structured choices (zero fragile regexes).
-2. **Takes the decision in 1 token** using the System-1 Decision Head (softmax over candidate logits).
-3. **Decodes a concise 1-sentence natural summary** using the warm prompt KV cache.
-
-#### Example A: Freeform Bulleted Choices (Diet & Health Triage)
-```bash
-curl -s http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      {
-        "role": "user",
-        "content": "decision: which of these should I eat\n\n- pizza\n- sushi\n- salad"
-      }
-    ]
-  }' | jq '{content: .choices[0].message.content, decision: .decision}'
-```
-
-**Response (~1.4s total):**
-```json
-{
-  "content": "C) salad (84.9% confidence) — You should choose the salad because it is the only option listed that is a healthy, low-calorie meal with high satiety compared to pizza and sushi.",
-  "decision": {
-    "best_option": "C",
-    "best_description": "salad",
-    "confidence_pct": 84.9,
-    "probabilities": {
-      "A": 0.00001,
-      "B": 0.1513,
-      "C": 0.8486
-    },
-    "explanation": "You should choose the salad because it is the only option listed that is a healthy, low-calorie meal with high satiety compared to pizza and sushi."
-  }
-}
-```
-
-#### Example B: Natural Language Inline Decision (Cloud Infrastructure)
-```bash
-curl -s http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      {
-        "role": "user",
-        "content": "Should I pick AWS, GCP, or Azure for high-throughput video streaming?"
-      }
-    ]
-  }' | jq .choices[0].message.content
-```
-**Output:**
-```
-"A) AWS (96.6% confidence) — AWS is the recommended choice due to its dominant global edge infrastructure and mature managed video streaming services."
-```
-
-#### Example C: Architecture / Language Selection
-```bash
-curl -s http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      {
-        "role": "user",
-        "content": "What should I choose between Rust or Go for writing our high-concurrency network proxy?"
-      }
-    ]
-  }' | jq .choices[0].message.content
-```
-**Output:**
-```
-"A) Rust (88.2% confidence) — Rust is better suited for high-concurrency proxies where zero-cost abstractions, zero garbage collection pauses, and memory safety are paramount."
-```
-
-*(Non-decision prompts like general questions, instructions, notes, and todo lists return `{"is_decision": false}` and pass through to standard autoregressive Chat).*
-
----
-
-### 3. Local Native Run (Python / `uv`)
+### 2. Local Native Run (Python / `uv`)
 For developers modifying Rubick source code:
 ```bash
 git clone https://github.com/wfzyx/rubick.git
@@ -381,22 +296,19 @@ cd rubick
 # Install dependencies in virtual environment
 uv sync
 
-# Run Rubick Gateway (Intent Auto-Routing and Explanations enabled by default)
+# Run Rubick Gateway
 uv run rubick --backend http://127.0.0.1:8080 --port 8000
-
-# Disable auto-routing or explanations if pure raw token throughput is needed:
-uv run rubick --backend http://127.0.0.1:8080 --port 8000 --no-intent-parser --no-explain
 ```
 
 ---
 
-### 4. Backend Engine (`llama.cpp`) Compatibility & Setup
+### 3. Backend Engine (`llama.cpp`) Compatibility & Setup
 
 | Capability | Upstream `llama.cpp` Status | Notes |
 |---|---|---|
 | **Generative Chat** (`/v1/chat/completions`) | **Stock upstream** (any build) | Uses standard decodes with SSE streaming. |
 | **System-1 Decisions** (`/v1/decision`) | **Stock upstream** (any build) | Uses standard OpenAI `logprobs: true, top_logprobs: 20`. |
-| **Natural Explanations** (`--explain`) | **Stock upstream** (any build) | Reuses prompt KV cache; 1-sentence completion. |
+| **Natural Explanations** (`explain: true`) | **Stock upstream** (any build) | Optional 1-sentence explanation parameter on `/v1/decision`. |
 | **Safety / Guardian** | **Stock upstream** (any build) | Rapid screening pass. |
 | **Single-Model Embeddings** (`/v1/embeddings`) | **Rubick Feature Branch** ([PR #30732](https://github.com/ggml-org/llama.cpp/pull/30732)) | Requires launching `llama-server --embedding --pooling none`. |
 
@@ -433,23 +345,12 @@ tests/test_gateway.py::test_chat_generation PASSED
 tests/test_gateway.py::test_guardian_screening_benign PASSED
 tests/test_gateway.py::test_concurrent_mixed_workload PASSED (156 req/s mixed throughput)
 tests/test_gateway.py::test_multi_decision_bitmask PASSED (Bitmask marginalization)
-tests/test_gateway.py::test_intent_parser_embedding_hijack PASSED
-tests/test_gateway.py::test_intent_parser_embed_prefix_hijack PASSED
-tests/test_gateway.py::test_intent_parser_decision_hijack PASSED
-tests/test_gateway.py::test_intent_parser_passthrough_chat PASSED
-tests/test_gateway.py::test_intent_parser_enabled_by_default PASSED
-tests/test_gateway.py::test_intent_parser_can_be_disabled_via_body PASSED
 tests/test_gateway.py::test_decision_pure_typed_by_default PASSED (JEV compliance)
 tests/test_gateway.py::test_decision_includes_explanation_when_requested PASSED
-tests/test_gateway.py::test_chat_completions_decision_hijack_includes_explanation_by_default PASSED
-tests/test_gateway.py::test_intent_parser_generic_markdown_list_stays_chat PASSED
 tests/test_tower.py::test_tower_frognano_chat PASSED (Live Tower FrogNano)
 tests/test_tower.py::test_tower_frognano_decision PASSED (Live Tower FrogNano)
-tests/test_tower.py::test_tower_recursive_llm_decision_extraction PASSED (Live Tower FrogNano)
-tests/test_tower.py::test_tower_end_to_end_decision_bulleted_list PASSED (Live Tower FrogNano)
-tests/test_tower.py::test_tower_end_to_end_decision_inline_alternatives PASSED (Live Tower FrogNano)
 
-======================== 26 passed in 8.96s =========================
+======================== 15 passed in 6.09s =========================
 ```
 
 ---
