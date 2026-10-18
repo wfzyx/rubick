@@ -5,15 +5,15 @@
 
 ---
 
-## ⚡ The Big Idea: Zero Adapters Required
+## ⚡ One Model, Many Use Cases
 
-**Rubick runs out-of-the-box on your base model** (empirically tested and benchmarked live on FrogNano 4B).
+**Rubick delivers Chat, Embeddings, Decisions, and Safety Guardrails from a single model instance in VRAM**—with zero mode switching (empirically tested and benchmarked live on FrogNano 4B).
 
-You do **not** need to train or load any LoRA adapters to get all 4 capabilities:
-- **Chat:** Standard autoregressive generation with streaming SSE chunks.
-- **Decisions:** 1-token logprob scoring with calibrated softmax over option keys via `/v1/decision` and multi-option bitmasking via `/v1/decision/multi`.
+You do **not** need to deploy separate models or train custom adapters to get all 4 capabilities:
+- **Chat:** Standard autoregressive generation with streaming SSE chunks (`/v1/chat/completions`).
+- **Decisions:** 1-token logprob scoring with calibrated softmax over option keys (`/v1/decision`) and multi-option bitmasking (`/v1/decision/multi`).
 - **Safety / Guardian:** Rapid prompt-based moderation and risk screening.
-- **Embeddings:** NuMind / PromptEOL 1-token summary prompt extracting the model's last hidden state $\vec{h} \in \mathbb{R}^{d}$.
+- **Embeddings:** NuMind / PromptEOL 1-token summary prompt extracting the model's last hidden state $\vec{h} \in \mathbb{R}^{d}$ (`/v1/embeddings`).
 
 ### The Optional `RBK` Adapter Series (Precision Boosters)
 While the unmodified base model handles all 4 roles natively, you can optionally attach specialized **Activated LoRA (aLoRA)** adapters to boost domain precision:
