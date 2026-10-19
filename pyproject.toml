@@ -1,8 +1,9 @@
 [project]
 name = "rubick"
 version = "0.1.0"
-description = "Add your description here"
+description = "Unified single-model AI gateway for Chat, Embeddings, Decisions, and Safety Guardrails"
 readme = "README.md"
+license = { text = "Apache-2.0" }
 authors = [
     { name = "Victor Hugo", email = "victor.panisa@gmail.com" }
 ]

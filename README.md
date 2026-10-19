@@ -1,5 +1,8 @@
 # Rubick 🪄
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+[![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-ff5e5b.svg?style=flat-square&logo=kofi&logoColor=white)](https://ko-fi.com/wfzyx)
+
 > *"No one can withstand my spellcraft."*  
 > A unified, single-model AI gateway that dynamically delivers **Chat**, **Embeddings**, **Decisions**, and **Safety Guardrails** from **one model instance in VRAM**—with zero mode switching.
 
@@ -375,3 +378,9 @@ If you use Rubick in your research, benchmarks, or agent infrastructure, please 
   version = {0.1.0}
 }
 ```
+
+---
+
+## 📄 License
+
+This project is licensed under the [Apache License, Version 2.0](LICENSE).
